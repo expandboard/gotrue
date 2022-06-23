@@ -520,5 +520,85 @@ func (u *User) IsBanned() bool {
 
 func (u *User) UpdateBannedUntil(tx *storage.Connection) error {
 	return tx.UpdateOnly(u, "banned_until")
+}
 
+// RemoveUnconfirmedIdentities removes potentially malicious unconfirmed identities from a user (if any)
+func (u *User) RemoveUnconfirmedIdentities(tx *storage.Connection) error {
+	unconfirmedProviders := []string{
+		"email",
+		"phone",
+	}
+
+	providersToRemove := make(map[string]bool)
+
+	for _, unconfirmedProvider := range unconfirmedProviders {
+		switch unconfirmedProvider {
+		case "email":
+			if u.IsConfirmed() {
+				continue
+			}
+
+			u.EncryptedPassword = ""
+
+			if terr := tx.UpdateOnly(u, "encrypted_password"); terr != nil {
+				return terr
+			}
+
+		case "phone":
+			if u.IsPhoneConfirmed() {
+				continue
+			}
+
+			u.Phone = ""
+
+			if terr := tx.UpdateOnly(u, "phone"); terr != nil {
+				return terr
+			}
+
+		default:
+			continue
+		}
+
+		providersToRemove[unconfirmedProvider] = true
+	}
+
+	if providersList, ok := u.AppMetaData["providers"].([]string); ok {
+		var newProviders []string
+
+		for _, provider := range providersList {
+			if providersToRemove[provider] {
+				continue
+			}
+
+			newProviders = append(newProviders, provider)
+		}
+
+		u.AppMetaData["providers"] = newProviders
+
+		if len(newProviders) > 0 {
+			u.AppMetaData["provider"] = newProviders[0]
+		} else {
+			u.AppMetaData["provider"] = nil
+		}
+
+		if terr := tx.UpdateOnly(u, "raw_app_meta_data"); terr != nil {
+			return terr
+		}
+	}
+
+	var newIdentities []Identity
+
+	for _, identity := range u.Identities {
+		if providersToRemove[identity.Provider] {
+			if terr := tx.Destroy(identity); terr != nil {
+				return terr
+			}
+		}
+
+		newIdentities = append(newIdentities, identity)
+	}
+
+	u.Identities = newIdentities
+
+	return nil
 }
